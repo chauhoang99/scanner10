@@ -24,14 +24,11 @@ COL_GOLD = "#D4AF37"
 COL_SLATE= "#7A8B99"
 
 # ==============================================================================
-# 1. OANDA API DATA & INSTRUMENT FETCHING
+# 1. OANDA API DATA & DYNAMIC INSTRUMENT FETCHING
 # ==============================================================================
 @st.cache_data(ttl=3600)
 def fetch_oanda_instruments(account_type: str, api_key: str) -> List[Dict[str, str]]:
-    """
-    Fetches all tradeable instruments for the account dynamically from OANDA.
-    Cached for 1 hour to prevent excessive API calls.
-    """
+    """Fetches all tradeable instruments dynamically from OANDA API."""
     base_url = (
         "https://api-fxpractice.oanda.com" if account_type == "Practice"
         else "https://api-fxtrade.oanda.com"
@@ -39,7 +36,6 @@ def fetch_oanda_instruments(account_type: str, api_key: str) -> List[Dict[str, s
     headers = {"Authorization": f"Bearer {api_key}"}
 
     try:
-        # Step 1: Get authorized account ID
         acc_res = requests.get(f"{base_url}/v3/accounts", headers=headers, timeout=10)
         if acc_res.status_code != 200:
             return []
@@ -49,14 +45,11 @@ def fetch_oanda_instruments(account_type: str, api_key: str) -> List[Dict[str, s
             return []
 
         account_id = accounts[0]["id"]
-
-        # Step 2: Get tradeable instruments for the account
         inst_res = requests.get(f"{base_url}/v3/accounts/{account_id}/instruments", headers=headers, timeout=10)
         if inst_res.status_code != 200:
             return []
 
         raw_instruments = inst_res.json().get("instruments", [])
-        
         instruments = [
             {
                 "name": item["name"],
@@ -64,7 +57,6 @@ def fetch_oanda_instruments(account_type: str, api_key: str) -> List[Dict[str, s
             }
             for item in raw_instruments
         ]
-        # Sort alphabetically by display name
         instruments.sort(key=lambda x: x["displayName"])
         return instruments
 
@@ -135,12 +127,12 @@ def fetch_oanda_candles(
 
 
 # ==============================================================================
-# 2. TECHNICAL INDICATORS & REGIME ENGINE
+# 2. INDICATORS & REGIME ENGINE
 # ==============================================================================
 def compute_indicators(df: pd.DataFrame, cal_win: int = 300) -> pd.DataFrame:
     df = df.copy()
 
-    # True Range & ATR
+    # ATR & True Range
     prev_close = df["close"].shift(1)
     tr1 = df["high"] - df["low"]
     tr2 = (df["high"] - prev_close).abs()
@@ -149,19 +141,19 @@ def compute_indicators(df: pd.DataFrame, cal_win: int = 300) -> pd.DataFrame:
     df["atr14"] = df["tr"].rolling(14).mean()
     df["atr20"] = df["tr"].rolling(20).mean()
 
-    # Range & Body Dynamics
+    # Candle Dynamics
     df["rng"] = df["high"] - df["low"]
     df["body"] = (df["close"] - df["open"]).abs()
     df["wick_up"] = df["high"] - np.maximum(df["open"], df["close"])
     df["wick_dn"] = np.minimum(df["open"], df["close"]) - df["low"]
 
-    # Flow Proxy / Volume Flow
+    # Flow Proxy
     vol_sma = df["volume"].rolling(50).mean()
     vol_avail = (vol_sma > 0).all()
     body_ratio = (df["close"] - df["open"]) / np.maximum(df["rng"], 1e-5)
     df["flow_unit"] = body_ratio * df["volume"] if vol_avail else body_ratio
 
-    # Self-Calibrating Thresholds (Percentiles)
+    # Dynamic Quantile Thresholds
     df["wick_up_thr"] = df["wick_up"].rolling(100).quantile(0.75)
     df["wick_dn_thr"] = df["wick_dn"].rolling(100).quantile(0.75)
     df["rng_thr"] = df["rng"].rolling(200).quantile(0.90)
@@ -197,7 +189,7 @@ def compute_indicators(df: pd.DataFrame, cal_win: int = 300) -> pd.DataFrame:
 
 
 # ==============================================================================
-# 3. LEVEL MAP & PRECEDENT ENGINE
+# 3. LEVEL MAP & PRECEDENT BACKOFF ENGINE
 # ==============================================================================
 class Level:
     def __init__(self, price: float, is_swing=False, is_eq=False, is_ob=False, is_htf=False, fvg_n=0, touches=0, birth=0):
@@ -253,7 +245,13 @@ def add_factor(levels: List[Level], price: float, tol: float, kind: int, bar_idx
             levels.pop(0)
 
 
-def process_precedent_engine(df: pd.DataFrame, horizon: int = 24, n_min: int = 20, maj_weight: int = 4):
+def process_precedent_engine(
+    df: pd.DataFrame,
+    horizon: int = 24,
+    n_min: int = 20,
+    maj_weight: int = 4
+):
+    """Executes event classification, level aggregation, outcomes recording, and backoff cascades."""
     levels: List[Level] = []
     store, pend, projs, events = [], [], [], []
     EV_SWEEP, EV_SQUEEZE, EV_CLIMAX = 1, 3, 4
@@ -269,7 +267,7 @@ def process_precedent_engine(df: pd.DataFrame, horizon: int = 24, n_min: int = 2
         atr14 = row["atr14"]
         lev_tol = 0.25 * atr14 if not np.isnan(atr14) else 0.001
 
-        # FVGs
+        # Level Updates (Fair Value Gaps)
         if i >= 2:
             if low > df.iloc[i-2]["high"] and df.iloc[i-1]["close"] > df.iloc[i-1]["open"]:
                 add_factor(levels, (low + df.iloc[i-2]["high"]) / 2.0, lev_tol, 3, c_bar)
@@ -279,7 +277,7 @@ def process_precedent_engine(df: pd.DataFrame, horizon: int = 24, n_min: int = 2
         loc_w = max([l.weight(c_bar) for l in levels if l.alive and abs(l.price - close) <= lev_tol] or [0])
         loc_cls = 2 if loc_w >= maj_weight else (1 if loc_w >= 1 else 0)
 
-        # Event Detection
+        # Event Detection Engine
         ev_id, ev_dir = 0, 0
         if row["wick_up"] >= row["wick_up_thr"] and high > close + lev_tol:
             ev_id, ev_dir = EV_SWEEP, -1
@@ -296,9 +294,13 @@ def process_precedent_engine(df: pd.DataFrame, horizon: int = 24, n_min: int = 2
             tier_v = 1
 
             events.append({"bar": c_bar, "time": row["time"], "price": close, "ev_id": ev_id, "dir": ev_dir})
-            pend.append({"sBar": c_bar, "anchor": close, "r": atr14, "dir": ev_dir, "ev": ev_id, "loc": loc_cls, "rg": regime, "tier": tier_v, "mfe": 0.0, "mae": 0.0, "e4": 0.0})
+            pend.append({
+                "sBar": c_bar, "anchor": close, "r": atr14, "dir": ev_dir,
+                "ev": ev_id, "loc": loc_cls, "rg": regime, "tier": tier_v,
+                "mfe": 0.0, "mae": 0.0, "e4": 0.0
+            })
 
-            # Signature Matching (L3 -> L2 -> L1 -> L0)
+            # Signature Matching & Backoff Cascade (L3 -> L2 -> L1 -> L0)
             i0 = [o for o in store if o["ev"] == ev_id and o["dir"] == ev_dir]
             i1 = [o for o in i0 if o["rg"] == regime]
             i2 = [o for o in i1 if o["loc"] == loc_cls]
@@ -319,9 +321,11 @@ def process_precedent_engine(df: pd.DataFrame, horizon: int = 24, n_min: int = 2
                     "tgt": close + ev_dir * d_tgt * atr14,
                     "hitPct": (np.array(mfe_arr) >= d_tgt).mean() * 100,
                     "n": len(sel), "lvl": lvl_used,
-                    "q75": float(np.percentile(e4_arr, 75)), "q25": float(np.percentile(e4_arr, 25))
+                    "q75": float(np.percentile(e4_arr, 75)),
+                    "q25": float(np.percentile(e4_arr, 25))
                 })
 
+        # Outcome Forward Evaluation
         for p in list(pend):
             age = c_bar - p["sBar"]
             p["mfe"] = max(p["mfe"], (high - p["anchor"] if p["dir"] > 0 else p["anchor"] - low) / max(p["r"], 1e-5))
@@ -331,39 +335,33 @@ def process_precedent_engine(df: pd.DataFrame, horizon: int = 24, n_min: int = 2
                 store.append(p)
                 pend.remove(p)
 
-    return events, projs, levels
+    return events, projs, levels, store
 
 
 # ==============================================================================
-# 4. STREAMLIT UI & MAIN APPLICATION
+# 4. STREAMLIT UI & DASHBOARD LAYOUT
 # ==============================================================================
 def main():
     st.sidebar.title("PRECEDENT Engine")
     st.sidebar.caption("OANDA v20 Multi-Timeframe Instrument Analytics")
 
-    # --- 1. SECRETS & API KEY MANAGEMENT ---
+    # Authentication
     st.sidebar.subheader("OANDA Authentication")
     account_type = st.sidebar.selectbox("Account Type", ["Practice", "Live"])
 
-    # Read API Key directly from Streamlit secrets, with UI text_input fallback
     secret_key = st.secrets.get("OANDA_API_KEY") or st.secrets.get("OANDA_TOKEN")
     if secret_key:
         api_key = secret_key
         st.sidebar.success("Loaded API Key from Secrets")
     else:
-        api_key = st.sidebar.text_input(
-            "OANDA API Key",
-            type="password",
-            help="To skip manual entry, add OANDA_API_KEY to App Secrets in Streamlit Cloud."
-        )
+        api_key = st.sidebar.text_input("OANDA API Key", type="password")
 
     if not api_key:
         st.info("Enter your OANDA API Key or set `OANDA_API_KEY` in Streamlit Community Cloud Secrets.")
         st.stop()
 
-    # --- 2. DYNAMIC INSTRUMENT SELECTION ---
+    # Dynamic Instrument Selection
     st.sidebar.subheader("Market Selection")
-    
     with st.spinner("Loading OANDA instruments..."):
         instruments = fetch_oanda_instruments(account_type, api_key)
 
@@ -379,11 +377,10 @@ def main():
             format_func=lambda x: inst_labels.get(x, x)
         )
     else:
-        st.sidebar.warning("Unable to fetch instruments dynamically. Using default list.")
-        fallback_list = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "USD_CHF", "XAU_USD", "SPX500_USD", "BCO_USD"]
+        fallback_list = ["EUR_USD", "GBP_USD", "USD_JPY", "AUD_USD", "USD_CAD", "USD_CHF", "XAU_USD", "SPX500_USD"]
         instrument = st.sidebar.selectbox("Instrument", fallback_list, index=0)
 
-    # --- 3. TIMEFRAME & PARAMETERS ---
+    # Timeframe & Engine Controls
     granularity = st.sidebar.selectbox("Timeframe", ["M1", "M5", "M15", "M30", "H1", "H4", "D", "W"], index=2)
     total_bars = st.sidebar.slider("Lookback Bars", min_value=500, max_value=5000, value=2000, step=500)
 
@@ -392,35 +389,38 @@ def main():
     n_min = st.sidebar.number_input("Min Sample n", min_value=5, max_value=100, value=20)
     maj_weight = st.sidebar.slider("MAJOR Level Weight", min_value=2, max_value=8, value=4)
 
-    # --- DATA FETCH & CALCULATIONS ---
+    # Execute Data Pipeline
     with st.spinner(f"Downloading {total_bars} bars of {instrument}..."):
         df = fetch_oanda_candles(account_type, api_key, instrument, granularity, total_bars)
 
     if df.empty:
-        st.warning("No candle data returned. Verify your API credentials and instrument selection.")
+        st.warning("No candle data returned.")
         st.stop()
 
     df = compute_indicators(df)
-    events, projs, levels = process_precedent_engine(df, horizon=horizon, n_min=n_min, maj_weight=maj_weight)
+    events, projs, levels, store = process_precedent_engine(df, horizon=horizon, n_min=n_min, maj_weight=maj_weight)
 
-    # --- KPI DISPLAY ---
+    # Top KPI Metrics
     latest = df.iloc[-1]
     reg_txt = "TREND" if latest["regime"] == 2 else ("RANGE" if latest["regime"] == 0 else "TRANS")
 
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("Selected Symbol", instrument)
     col2.metric("Regime", reg_txt, delta=f"ER Rank: {latest['er_rank']:.1f}%")
     col3.metric("ATR (14)", f"{latest['atr14']:.5f}")
     col4.metric("Active Projections", len(projs))
+    col5.metric("Completed Outcomes", len(store))
 
-    # --- PLOTLY CHART ---
+    # Plotly Candlestick & Projection Chart
     fig = go.Figure()
 
+    # Candlestick Series
     fig.add_trace(go.Candlestick(
         x=df["time"], open=df["open"], high=df["high"], low=df["low"], close=df["close"],
         name="Price", increasing_line_color=COL_BULL, decreasing_line_color=COL_BEAR
     ))
 
+    # Structural Levels
     for l in levels:
         if l.alive:
             fig.add_shape(
@@ -430,6 +430,7 @@ def main():
                 line=dict(color=COL_GOLD if l.weight(len(df)) >= maj_weight else COL_SLATE, width=1, dash="dash")
             )
 
+    # Event Markers
     ev_names = {1: "SWP", 3: "SQZ", 4: "CLX"}
     for ev in events:
         fig.add_annotation(
@@ -442,6 +443,7 @@ def main():
             bgcolor=COL_BULL if ev["dir"] > 0 else COL_BEAR
         )
 
+    # Projection Fan & Target Overlay
     if projs:
         last_p = projs[-1]
         s_time = last_p["time"]
@@ -471,7 +473,7 @@ def main():
 
     fig.update_layout(
         template="plotly_dark",
-        height=650,
+        height=600,
         margin=dict(l=10, r=10, t=30, b=10),
         xaxis_rangeslider_visible=False,
         yaxis=dict(title="Price"),
@@ -480,9 +482,47 @@ def main():
 
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader("Projection Log")
+    # ==============================================================================
+    # 5. DIAGNOSTIC LEDGERS & TABLES
+    # ==============================================================================
+    st.subheader("PRECEDENT Diagnostic Table (Axis Health & Outcome Ledger)")
+
+    if store:
+        df_store = pd.DataFrame(store)
+        ev_map = {1: "Sweep", 3: "Squeeze", 4: "Climax"}
+        rg_map = {0: "RANGE", 1: "TRANS", 2: "TREND"}
+        loc_map = {0: "NONE", 1: "MINOR", 2: "MAJOR"}
+
+        summary = []
+        for (ev_id, rg, loc), group in df_store.groupby(["ev", "rg", "loc"]):
+            n = len(group)
+            med_mfe = group["mfe"].median()
+            med_mae = group["mae"].median()
+            exp_val = group["e4"].mean()
+            win_rate = (group["e4"] > 0).mean() * 100
+
+            summary.append({
+                "Event Type": ev_map.get(ev_id, f"EV_{ev_id}"),
+                "Regime": rg_map.get(rg, "N/A"),
+                "Location Class": loc_map.get(loc, "NONE"),
+                "Sample Count (n)": n,
+                "Win Rate (%)": f"{win_rate:.1f}%",
+                "Median MFE (ATR)": f"{med_mfe:.2f}R",
+                "Median MAE (ATR)": f"{med_mae:.2f}R",
+                "Expectancy E[R]": f"{exp_val:+.2f}R"
+            })
+
+        df_diag = pd.DataFrame(summary).sort_values("Sample Count (n)", ascending=False)
+        st.dataframe(df_diag, use_container_width=True)
+    else:
+        st.info("Accumulating outcome historical data... Check back as more bars pass.")
+
+    st.subheader("Active Projection Log")
     if projs:
-        st.dataframe(pd.DataFrame(projs)[["time", "anchor", "dir", "tgt", "hitPct", "n", "lvl"]], use_container_width=True)
+        st.dataframe(
+            pd.DataFrame(projs)[["time", "anchor", "dir", "tgt", "hitPct", "n", "lvl"]],
+            use_container_width=True
+        )
 
 
 if __name__ == "__main__":
