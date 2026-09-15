@@ -11,7 +11,6 @@ import plotly.graph_objects as go
 
 
 # ============================================================
-# PRECEDENT [ThrowMaster] - Streamlit/OANDA conversion
 # ============================================================
 # The Pine version is a bar-close measurement instrument. This
 # Python version keeps the same event classes, level map, score,
@@ -23,7 +22,7 @@ import plotly.graph_objects as go
 # the downloaded history rather than relying on Pine's var state.
 # ============================================================
 
-st.set_page_config(page_title="PRECEDENT [ThrowMaster]", layout="wide")
+st.set_page_config(page_title="SCANNEr", layout="wide")
 
 # ---------- OANDA ----------
 LIVE_URL = "https://api-fxtrade.oanda.com"
@@ -1312,7 +1311,7 @@ with st.sidebar:
     granularity = st.selectbox(
         "Chart timeframe",
         ["M5", "M15", "M30", "H1", "H4", "D"],
-        index=3,
+        index=0,
     )
 
     st.header("Engine")
