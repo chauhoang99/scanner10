@@ -86,6 +86,42 @@ def discover_oanda_account(token: str, environment: str):
     return accounts[0].get("id")
 
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_oanda_instruments(token: str, account_id: str, environment: str):
+    """Fetch the complete tradeable instrument list for the authorized OANDA account."""
+    base = PRACTICE_URL if environment == "practice" else LIVE_URL
+    url = f"{base}/v3/accounts/{account_id}/instruments"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept-Datetime-Format": "RFC3339",
+    }
+
+    r = requests.get(url, headers=headers, timeout=20)
+    r.raise_for_status()
+    payload = r.json()
+
+    instruments = payload.get("instruments", [])
+    if not instruments:
+        raise RuntimeError("OANDA returned no tradeable instruments for this account.")
+
+    # Keep both the OANDA instrument name and display name. The dropdown
+    # uses the API's actual instrument name so it can be passed directly
+    # to the v20 candles endpoint.
+    rows = []
+    for item in instruments:
+        name = item.get("name")
+        if not name:
+            continue
+        rows.append({
+            "name": name,
+            "displayName": item.get("displayName", name),
+            "type": item.get("type", ""),
+        })
+
+    rows.sort(key=lambda x: (x["type"], x["displayName"], x["name"]))
+    return rows
+
+
 @st.cache_data(ttl=20, show_spinner=False)
 def fetch_oanda_candles(
     instrument: str,
@@ -1252,16 +1288,26 @@ except Exception as exc:
     st.error(f"Could not authenticate with OANDA: {exc}")
     st.stop()
 
+try:
+    with st.spinner("Loading OANDA instruments..."):
+        oanda_instruments = fetch_oanda_instruments(token, account_id, environment)
+except Exception as exc:
+    st.error(f"Could not load OANDA instruments: {exc}")
+    st.stop()
+
+instrument_names = [x["name"] for x in oanda_instruments]
+instrument_labels = {
+    x["name"]: f"{x['displayName']} ({x['name']})"
+    for x in oanda_instruments
+}
+
 with st.sidebar:
     st.header("Instrument")
     instrument = st.selectbox(
         "OANDA instrument",
-        [
-            "EUR_USD", "GBP_USD", "USD_JPY", "USD_CAD", "AUD_USD",
-            "NZD_USD", "USD_CHF", "USD_SGD", "EUR_GBP", "EUR_JPY",
-            "GBP_JPY", "XAU_USD",
-        ],
-        index=0,
+        instrument_names,
+        index=instrument_names.index("EUR_USD") if "EUR_USD" in instrument_names else 0,
+        format_func=lambda x: instrument_labels.get(x, x),
     )
     granularity = st.selectbox(
         "Chart timeframe",
