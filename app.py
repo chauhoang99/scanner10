@@ -51,39 +51,18 @@ def get_secret(name: str, default=None):
 def get_oanda_credentials():
     # Preferred Community Cloud secrets:
     # OANDA_API_KEY = "..."
+    # OANDA_ACCOUNT_ID = "..."
     # OANDA_ENV = "live"       # or "practice"
-    #
-    # The account ID is discovered automatically from the token via
-    # GET /v3/accounts, so it is NOT required in Streamlit Secrets.
     token = get_secret("OANDA_API_KEY")
+    account = get_secret("OANDA_ACCOUNT_ID")
     env = str(get_secret("OANDA_ENV", "live")).lower()
 
     if not token:
         token = get_secret("oanda_api_key")
+    if not account:
+        account = get_secret("oanda_account_id")
 
-    return token, env
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def discover_oanda_account(token: str, environment: str):
-    """Discover an authorized OANDA account using the API token."""
-    base = PRACTICE_URL if environment == "practice" else LIVE_URL
-    url = f"{base}/v3/accounts"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept-Datetime-Format": "RFC3339",
-    }
-
-    r = requests.get(url, headers=headers, timeout=20)
-    r.raise_for_status()
-    payload = r.json()
-    accounts = payload.get("accounts", [])
-    if not accounts:
-        raise RuntimeError("OANDA returned no accounts authorized for this API token.")
-
-    # Use the first account authorized by the token. The API token can access
-    # all sub-accounts belonging to the OANDA user.
-    return accounts[0].get("id")
+    return token, account, env
 
 
 @st.cache_data(ttl=20, show_spinner=False)
@@ -1225,31 +1204,29 @@ st.caption(
     "no forward-looking HTF values."
 )
 
-token, environment = get_oanda_credentials()
+token, account_id, environment = get_oanda_credentials()
+
+if not token or not account_id:
+    st.error(
+        "Missing OANDA credentials. Add OANDA_API_KEY and OANDA_ACCOUNT_ID "
+        "to Streamlit Community Cloud Secrets."
+    )
+    st.code(
+        '[oanda]\n'
+        'api_key = "YOUR_OANDA_TOKEN"\n'
+        'account_id = "YOUR_OANDA_ACCOUNT_ID"\n'
+        'environment = "live"\n'
+    )
+    st.stop()
 
 # Secrets can also be nested under [oanda].
 try:
     if "oanda" in st.secrets:
         token = st.secrets["oanda"].get("api_key", token)
+        account_id = st.secrets["oanda"].get("account_id", account_id)
         environment = st.secrets["oanda"].get("environment", environment)
 except Exception:
     pass
-
-if not token:
-    st.error("Missing OANDA_API_KEY in Streamlit Community Cloud Secrets.")
-    st.code(
-        '[oanda]\n'
-        'api_key = "YOUR_OANDA_TOKEN"\n'
-        'environment = "live"\n'
-    )
-    st.stop()
-
-try:
-    with st.spinner("Authenticating with OANDA..."):
-        account_id = discover_oanda_account(token, environment)
-except Exception as exc:
-    st.error(f"Could not authenticate with OANDA: {exc}")
-    st.stop()
 
 with st.sidebar:
     st.header("Instrument")
