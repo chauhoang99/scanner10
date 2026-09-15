@@ -51,12 +51,12 @@ def get_secret(name: str, default=None):
 def get_oanda_credentials():
     # Preferred Community Cloud secrets:
     # OANDA_API_KEY = "..."
-    # OANDA_ENV = "practice"       # or "practice"
+    # OANDA_ENV = "practice"
     #
     # The account ID is discovered automatically from the token via
     # GET /v3/accounts, so it is NOT required in Streamlit Secrets.
     token = get_secret("OANDA_API_KEY")
-    env = str(get_secret("OANDA_ENV", "live")).lower()
+    env = str(get_secret("OANDA_ENV", "practice")).lower()
 
     if not token:
         token = get_secret("oanda_api_key")
@@ -632,6 +632,7 @@ def run_engine(
     last_ph = prev_ph = np.nan
     last_pl = prev_pl = np.nan
     last_phf = prev_phf = np.nan
+    last_plf = prev_plf = np.nan
     bos_hi = bos_lo = np.nan
     last_phi = last_pli = np.nan
 
