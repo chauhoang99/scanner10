@@ -1256,7 +1256,7 @@ def make_chart(df, result, show_levels=True, show_events=True, show_target=True)
 
 # ---------- UI ----------
 
-st.title("PRECEDENT [ThrowMaster]")
+st.title("SCANNER")
 st.caption(
     "Measurement instrument — OANDA completed candles, empirical precedent, "
     "no forward-looking HTF values."
